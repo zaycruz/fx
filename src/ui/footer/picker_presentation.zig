@@ -83,7 +83,7 @@ fn setupChoiceLabel(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .switch_provider => "Model provider",
                 .change_team => "Vercel team",
                 .switch_credential => "Credential source",
-                .login, .chatgpt_login, .grok_login, .setup, .automatic => "",
+                .login, .chatgpt_login, .grok_login, .setup, .openrouter_key, .automatic => "",
             },
             .provider, .source, .team => "",
         },
@@ -93,6 +93,7 @@ fn setupChoiceLabel(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .chatgpt_login => "Codex subscription",
                 .grok_login => "Grok subscription",
                 .setup => "AI Gateway API key",
+                .openrouter_key => "OpenRouter API key",
                 .connections, .change_team, .switch_credential, .switch_provider, .automatic => "",
             },
             .provider, .source, .team => "",
@@ -118,7 +119,7 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                     view.activeSourceLabel()
                 else
                     "not connected",
-                .login, .chatgpt_login, .grok_login, .setup, .automatic => "",
+                .login, .chatgpt_login, .grok_login, .setup, .openrouter_key, .automatic => "",
             },
             .provider, .source, .team => "",
         },
@@ -130,6 +131,10 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .setup => if (view.available_sources.contains(.stored_key))
                     "stored"
                 else if (view.available_sources.contains(.ai_gateway_api_key))
+                    "environment"
+                else
+                    "not configured",
+                .openrouter_key => if (view.available_sources.contains(.openrouter_api_key))
                     "environment"
                 else
                     "not configured",
@@ -2061,7 +2066,7 @@ test "auth picker renders the staged switch and disabled team screens" {
         .stage = .provider,
     };
     const provider_rows = authPickerRowCount(provider_view);
-    try std.testing.expectEqual(@as(u16, 5), provider_rows);
+    try std.testing.expectEqual(@as(u16, 6), provider_rows);
     var provider_header = try composeAuthPickerRow(alloc, provider_view, 0, provider_rows, 80);
     defer provider_header.deinit(alloc);
     try std.testing.expect(std.mem.startsWith(u8, provider_header.items, ui_render.dim_style));
