@@ -65,7 +65,9 @@ The Grok route uses subscription access directly at xAI and never sends its OAut
 The Local route talks directly to your own server and never sends prompts to
 Vercel AI Gateway, OpenAI, or xAI. It reads `FX_LOCAL_BASE_URL` (default
 `http://127.0.0.1:8080/v1`) and calls `<base>/chat/completions` and
-`<base>/models`. Plain HTTP is accepted only for loopback hosts; any host is
+`<base>/models`. Plain HTTP is accepted only for literal loopback addresses
+(127.0.0.0/8 or `[::1]`) — not hostnames like `localhost` — so unencrypted
+traffic can never be redirected off-host by DNS or the hosts file. Any host is
 accepted over HTTPS, so a server on another tailnet machine works too. Point
 one variable at your server:
 

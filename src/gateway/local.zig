@@ -10,17 +10,52 @@ const Allocator = std.mem.Allocator;
 
 /// Base URL of a local OpenAI-compatible server (`/v1` style). The chat and
 /// models endpoints derive from it. HTTPS is accepted for any host (e.g. a
-/// Tailscale address); plain HTTP is accepted only for loopback hosts, the
-/// same policy as the Gateway base-URL override, because the bearer token
-/// rides on every request.
+/// Tailscale address); plain HTTP is accepted only for literal loopback
+/// addresses (127.0.0.0/8, ::1), never hostnames: the bearer token rides on
+/// every request, and a name like `localhost` is DNS- or hosts-file
+/// redirectable, so it cannot be trusted to keep plaintext traffic on-host.
 const default_base_url = "http://127.0.0.1:8080/v1";
 const base_url_env = "FX_LOCAL_BASE_URL";
 const chat_url_env = "FX_LOCAL_CHAT_URL";
 
 pub fn validateEndpointUrl(url: []const u8) bool {
     const uri = std.Uri.parse(url) catch return false;
+    if (uri.user != null or uri.password != null) return false;
     if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return uri.host != null;
-    return gateway_client.isLoopbackHttpUrl(url);
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") or uri.port == null) return false;
+    const host_component = uri.host orelse return false;
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = host_component.toRaw(&host_buf) catch return false;
+    return isLiteralLoopbackHost(host);
+}
+
+fn isLiteralLoopbackHost(host: []const u8) bool {
+    if (std.mem.eql(u8, host, "[::1]")) return true;
+    return isIpv4LoopbackLiteral(host);
+}
+
+/// Strict dotted-quad parser: exactly four base-10 octets (0-255), first
+/// octet 127. Rejects decimal, hex, and octal single-token encodings because
+/// they never parse as four components.
+fn isIpv4LoopbackLiteral(host: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, host, '.');
+    var index: u8 = 0;
+    while (parts.next()) |part| : (index += 1) {
+        if (index > 3 or part.len == 0 or part.len > 3) return false;
+        const value = parseOctet(part) orelse return false;
+        if (index == 0 and value != 127) return false;
+    }
+    return index == 4;
+}
+
+fn parseOctet(part: []const u8) ?u8 {
+    var value: u16 = 0;
+    for (part) |c| {
+        if (c < '0' or c > '9') return null;
+        value = value * 10 + (c - '0');
+    }
+    if (value > 255) return null;
+    return @intCast(value);
 }
 
 /// Pure derivation from resolved inputs, so the policy stays testable without
@@ -351,7 +386,7 @@ pub fn streamPrepared(
 
     var response = try http_request.receiveHead(&.{});
     if (response.head.status != .ok) {
-        return failureResult(alloc, &response);
+        return failureResult(alloc, &response, request.credential.secret);
     }
 
     var transfer_buffer: [transfer_buffer_bytes]u8 = undefined;
@@ -392,9 +427,13 @@ pub fn streamPrepared(
 }
 
 /// Reads a bounded error body and maps the status onto the neutral failure
-/// contract. The detail string explains the Local-specific conditions a
-/// user is most likely to hit, especially on the free tier.
-fn failureResult(alloc: Allocator, response: *std.http.Client.Response) !stream_provider.Result {
+/// contract. The active credential is redacted from the server text before
+/// any of it becomes user-visible.
+fn failureResult(
+    alloc: Allocator,
+    response: *std.http.Client.Response,
+    credential_value: []const u8,
+) !stream_provider.Result {
     // Read the headers before the body: consuming the body may reuse the
     // buffer the parsed head points into.
     const status = response.head.status;
@@ -411,12 +450,15 @@ fn failureResult(alloc: Allocator, response: *std.http.Client.Response) !stream_
         break :body try alloc.dupe(u8, "Local error response exceeded the local limit");
     } else bounded_body;
     errdefer alloc.free(body);
+    // A server may echo the bearer token back in its error body
+    // ("invalid token: <key>"); it must never reach user-visible output.
+    const sanitized = try redactCredential(alloc, body, credential_value);
 
     const detail = if (statusGuidance(status)) |guidance| detail: {
-        const combined = try std.fmt.allocPrint(alloc, "{s} ({s})", .{ guidance, body });
-        alloc.free(body);
+        const combined = try std.fmt.allocPrint(alloc, "{s} ({s})", .{ guidance, sanitized });
+        alloc.free(sanitized);
         break :detail combined;
-    } else body;
+    } else sanitized;
 
     return .{ .failed = .{
         .kind = failureKind(status),
@@ -426,22 +468,32 @@ fn failureResult(alloc: Allocator, response: *std.http.Client.Response) !stream_
     } };
 }
 
+/// Replaces every occurrence of the active credential in untrusted server
+/// text before display. Returns `body` unchanged when the key is absent.
+fn redactCredential(alloc: Allocator, body: []u8, value: []const u8) ![]u8 {
+    if (value.len == 0 or std.mem.indexOf(u8, body, value) == null) return body;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    var rest = body;
+    while (std.mem.indexOf(u8, rest, value)) |idx| {
+        try out.appendSlice(alloc, rest[0..idx]);
+        try out.appendSlice(alloc, "[redacted]");
+        rest = rest[idx + value.len ..];
+    }
+    try out.appendSlice(alloc, rest);
+    alloc.free(body);
+    return out.toOwnedSlice(alloc);
+}
+
 /// Plain-language guidance for the statuses whose Local meaning is not
 /// obvious from the code alone.
-///
-/// `FailureKind` has no payment-required variant, so a 402 is reported as
-/// `forbidden` (correctly non-retryable) and would otherwise surface as
-/// "HTTP 403". The guidance names the real upstream status so the message
-/// cannot mislead.
 fn statusGuidance(status: std.http.Status) ?[]const u8 {
     return switch (status) {
-        .payment_required => "Local returned 402: credit balance is negative; " ++
-            "add credits. This blocks free models too",
-        .too_many_requests => "Local rate limit reached. Free models allow " ++
-            "20 requests per minute and 50 per day, raised to 1000 per day once " ++
-            "you have purchased at least 10 credits",
-        .service_unavailable => "No Local provider currently satisfies the " ++
-            "routing requirements for this model",
+        .unauthorized => "Local server rejected the request; check LOCAL_API_KEY " ++
+            "matches the server's configured key (if any)",
+        .not_found => "Local endpoint not found; check FX_LOCAL_BASE_URL points at " ++
+            "the server's root (for example http://127.0.0.1:8080/v1)",
+        .too_many_requests => "Local server is busy; retry shortly",
         else => null,
     };
 }
@@ -812,11 +864,36 @@ test "Local maps HTTP status onto the neutral failure contract" {
     try testing.expectEqual(stream_provider.FailureKind.unavailable, failureKind(.service_unavailable));
     try testing.expectEqual(stream_provider.FailureKind.invalid_request, failureKind(.bad_request));
 
-    // The statuses a free-tier user actually hits carry actionable guidance.
-    try testing.expect(std.mem.indexOf(u8, statusGuidance(.payment_required).?, "402") != null);
-    try testing.expect(std.mem.indexOf(u8, statusGuidance(.too_many_requests).?, "50 per day") != null);
-    try testing.expect(statusGuidance(.service_unavailable) != null);
+    // The statuses a local-server user actually hits carry actionable guidance.
+    try testing.expect(std.mem.indexOf(u8, statusGuidance(.unauthorized).?, "LOCAL_API_KEY") != null);
+    try testing.expect(std.mem.indexOf(u8, statusGuidance(.not_found).?, "FX_LOCAL_BASE_URL") != null);
+    try testing.expect(std.mem.indexOf(u8, statusGuidance(.too_many_requests).?, "busy") != null);
     try testing.expect(statusGuidance(.ok) == null);
+}
+
+test "Local redacts the active key from server error bodies" {
+    const key = "sk-local-secret-42";
+    const body = try testing.allocator.dupe(
+        u8,
+        "{\"error\":{\"message\":\"invalid token: sk-local-secret-42 provided\"}}",
+    );
+    const out = try redactCredential(testing.allocator, body, key);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, key) == null);
+    try testing.expect(std.mem.indexOf(u8, out, "[redacted]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "invalid token") != null);
+
+    // Absent key: the body is returned unchanged (same allocation).
+    const clean = try testing.allocator.dupe(u8, "plain error");
+    const same = try redactCredential(testing.allocator, clean, key);
+    defer testing.allocator.free(same);
+    try testing.expect(same.ptr == clean.ptr);
+
+    // Empty key (should not occur) must not loop or rewrite.
+    const empty_key_body = try testing.allocator.dupe(u8, "x");
+    const untouched = try redactCredential(testing.allocator, empty_key_body, "");
+    defer testing.allocator.free(untouched);
+    try testing.expectEqualStrings("x", untouched);
 }
 
 test "Local SSE stream survives keep-alive comments and reports exact usage" {
@@ -931,9 +1008,15 @@ test "endpoint resolution derives chat and models URLs from the base" {
     try testing.expect(std.mem.indexOf(u8, default_base_url, "127.0.0.1") != null);
 
     try testing.expect(validateEndpointUrl("http://127.0.0.1:8080/v1"));
-    try testing.expect(validateEndpointUrl("http://localhost:11434/v1"));
+    try testing.expect(validateEndpointUrl("http://127.9.9.9:8080/v1"));
+    try testing.expect(validateEndpointUrl("http://[::1]:8080/v1"));
     try testing.expect(validateEndpointUrl("https://tailscale-host.example/v1"));
+    // Hostnames resolve; only literal loopback keeps plaintext on-host.
+    try testing.expect(!validateEndpointUrl("http://localhost:11434/v1"));
+    try testing.expect(!validateEndpointUrl("http://127.1:8080/v1"));
+    try testing.expect(!validateEndpointUrl("http://0x7f000001:8080/v1"));
     try testing.expect(!validateEndpointUrl("http://evil.example/v1"));
+    try testing.expect(!validateEndpointUrl("http://evil.example@127.0.0.1:8080/v1"));
     try testing.expect(!validateEndpointUrl("not a url"));
 
     try testing.expectEqualStrings(

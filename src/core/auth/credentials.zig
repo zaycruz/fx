@@ -93,7 +93,12 @@ pub const CatalogAccess = union(enum) {
     pub fn publicFallbackAfterRejection(self: CatalogAccess) ?CatalogAccess {
         return switch (self) {
             .public_only => null,
-            .authenticated => |access| if (access.source == .chatgpt_subscription or access.source == .grok_subscription)
+            // Subscription catalogs and a user-configured local server carry
+            // no public catalog: a rejection means the credential or endpoint
+            // is wrong, and an anonymous retry would hide that failure.
+            .authenticated => |access| if (access.source == .chatgpt_subscription or
+                access.source == .grok_subscription or
+                access.source == .local_api_key)
                 null
             else
                 .{
@@ -766,6 +771,10 @@ test "catalog access isolates public and authenticated provider credentials" {
     try std.testing.expectEqualStrings("chatgpt-secret", chatgpt.authorizationCredential().?);
     try std.testing.expect(chatgpt.teamContext() == null);
     try std.testing.expect(chatgpt.publicFallbackAfterRejection() == null);
+
+    const local = catalogAccessForCredential(.local_api_key, "local-secret", null);
+    try std.testing.expectEqual(Source.local_api_key, local.credentialSource().?);
+    try std.testing.expect(local.publicFallbackAfterRejection() == null);
 
     var grok_credential = Credential{
         .token = try std.testing.allocator.dupe(u8, "grok-secret"),
