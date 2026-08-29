@@ -8,12 +8,48 @@ const types = @import("../core/shared/types.zig");
 
 const Allocator = std.mem.Allocator;
 
-const endpoint = "https://openrouter.ai/api/v1/chat/completions";
-const e2e_endpoint_env = "FX_E2E_OPENROUTER_CHAT_URL";
+/// Base URL of a local OpenAI-compatible server (`/v1` style). The chat and
+/// models endpoints derive from it. HTTPS is accepted for any host (e.g. a
+/// Tailscale address); plain HTTP is accepted only for loopback hosts, the
+/// same policy as the Gateway base-URL override, because the bearer token
+/// rides on every request.
+const default_base_url = "http://127.0.0.1:8080/v1";
+const base_url_env = "FX_LOCAL_BASE_URL";
+const chat_url_env = "FX_LOCAL_CHAT_URL";
 
-/// OpenRouter ranks calling applications by these attribution headers.
-const referer_header = "https://github.com/vercel-labs/fx";
-const title_header = "fx";
+pub fn validateEndpointUrl(url: []const u8) bool {
+    const uri = std.Uri.parse(url) catch return false;
+    if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return uri.host != null;
+    return gateway_client.isLoopbackHttpUrl(url);
+}
+
+/// Pure derivation from resolved inputs, so the policy stays testable without
+/// mutating the process environment.
+pub fn deriveChatEndpoint(alloc: Allocator, chat_url: ?[]const u8, base_url: []const u8) ![]u8 {
+    if (chat_url) |url| {
+        if (!validateEndpointUrl(url)) return error.InvalidLocalEndpoint;
+        return alloc.dupe(u8, url);
+    }
+    if (!validateEndpointUrl(base_url)) return error.InvalidLocalEndpoint;
+    const trimmed = std.mem.trimEnd(u8, base_url, "/");
+    return std.fmt.allocPrint(alloc, "{s}/chat/completions", .{trimmed});
+}
+
+pub fn deriveModelsEndpoint(alloc: Allocator, base_url: []const u8) ![]u8 {
+    if (!validateEndpointUrl(base_url)) return error.InvalidLocalEndpoint;
+    const trimmed = std.mem.trimEnd(u8, base_url, "/");
+    return std.fmt.allocPrint(alloc, "{s}/models", .{trimmed});
+}
+
+pub fn resolveChatEndpoint(alloc: Allocator) ![]u8 {
+    const base = io_mod.getenv(base_url_env) orelse default_base_url;
+    return deriveChatEndpoint(alloc, io_mod.getenv(chat_url_env), base);
+}
+
+pub fn resolveModelsEndpoint(alloc: Allocator) ![]u8 {
+    const base = io_mod.getenv(base_url_env) orelse default_base_url;
+    return deriveModelsEndpoint(alloc, base);
+}
 
 const max_error_body_bytes: usize = 256 * 1024;
 const max_sse_line_bytes: usize = 1024 * 1024;
@@ -30,10 +66,53 @@ pub const agent_stream_provider = stream_provider.Provider{
 };
 
 fn validateModel(model: []const u8) !void {
-    if (model.len == 0 or model.len > 256) return error.InvalidOpenRouterModel;
+    if (model.len == 0 or model.len > 256) return error.InvalidLocalModel;
     for (model) |byte| {
-        if (byte <= 0x20 or byte == 0x7f) return error.InvalidOpenRouterModel;
+        if (byte <= 0x20 or byte == 0x7f) return error.InvalidLocalModel;
     }
+}
+
+const MergedMessages = struct {
+    messages: []const types.ChatMessage,
+    owned: bool = false,
+
+    fn deinit(self: *const MergedMessages, alloc: Allocator) void {
+        if (!self.owned) return;
+        if (self.messages[0].content) |content| alloc.free(@constCast(content));
+        alloc.free(self.messages);
+    }
+};
+
+/// Many local OpenAI-compatible servers (llama.cpp, MLX) accept only one
+/// leading system message. fx sends several (identity, tool notes, context
+/// blocks), so fold every leading system message into one before the request
+/// leaves. System blocks after a non-system message are left alone.
+fn mergeLeadingSystemMessages(
+    alloc: Allocator,
+    messages: []const types.ChatMessage,
+) !MergedMessages {
+    var system_count: usize = 0;
+    for (messages) |message| {
+        if (message.role != .system) break;
+        system_count += 1;
+    }
+    if (system_count < 2) return .{ .messages = messages };
+
+    var joined: std.ArrayList(u8) = .empty;
+    errdefer joined.deinit(alloc);
+    for (messages[0..system_count]) |message| {
+        const content = message.content orelse continue;
+        if (content.len == 0) continue;
+        if (joined.items.len > 0) try joined.appendSlice(alloc, "\n\n");
+        try joined.appendSlice(alloc, content);
+    }
+
+    const rest = messages[system_count..];
+    const out = try alloc.alloc(types.ChatMessage, rest.len + 1);
+    errdefer alloc.free(out);
+    out[0] = .{ .role = .system, .content = try joined.toOwnedSlice(alloc) };
+    @memcpy(out[1..], rest);
+    return .{ .messages = out, .owned = true };
 }
 
 pub fn buildRequest(
@@ -57,11 +136,14 @@ pub fn buildRequest(
     // be reported exactly instead of deferred to a follow-up lookup.
     try writer.writeAll(",\"usage\":{\"include\":true}");
 
+    const merged = try mergeLeadingSystemMessages(alloc, request.messages);
+    defer merged.deinit(alloc);
+
     try writer.writeAll(",\"messages\":[");
     chat_completions.writeMessages(
         writer,
         alloc,
-        request.messages,
+        merged.messages,
         request.verified_images,
         .{
             .tool_calls = max_tool_calls,
@@ -113,9 +195,9 @@ pub fn buildRequest(
 
 fn mapSerializeError(err: anyerror) anyerror {
     return switch (err) {
-        error.ToolCallLimitExceeded => error.OpenRouterToolCallLimitExceeded,
-        error.ToolArgumentsTooLarge => error.OpenRouterToolArgumentsTooLarge,
-        error.InvalidToolSchema => error.InvalidOpenRouterToolSchema,
+        error.ToolCallLimitExceeded => error.LocalToolCallLimitExceeded,
+        error.ToolArgumentsTooLarge => error.LocalToolArgumentsTooLarge,
+        error.InvalidToolSchema => error.InvalidLocalToolSchema,
         else => err,
     };
 }
@@ -126,10 +208,10 @@ fn streamCompletion(
     request: stream_provider.ModelRequest,
 ) !stream_provider.Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-    if (request.credential.source != .openrouter_api_key) {
-        return error.OpenRouterApiKeyRequired;
+    if (request.credential.source != .local_api_key) {
+        return error.LocalApiKeyRequired;
     }
-    if (request.credential.secret.len == 0) return error.OpenRouterApiKeyRequired;
+    if (request.credential.secret.len == 0) return error.LocalApiKeyRequired;
     try validateModel(request.model);
 
     const payload = try buildRequest(alloc, request.data());
@@ -200,20 +282,11 @@ pub fn streamPrepared(
     const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
     defer secret.zeroAndFree(alloc, auth_header);
 
-    const request_endpoint = if (io_mod.getenv(e2e_endpoint_env)) |override| endpoint: {
-        if (!gateway_client.isLoopbackHttpUrl(override)) return error.InvalidE2EOpenRouterEndpoint;
-        break :endpoint override;
-    } else endpoint;
+    const request_endpoint = try resolveChatEndpoint(alloc);
+    defer alloc.free(request_endpoint);
     const uri = try std.Uri.parse(request_endpoint);
 
-    var extra_headers_buf: [4]std.http.Header = undefined;
-    var extra_count: usize = 0;
-    extra_headers_buf[extra_count] = .{ .name = "accept", .value = "text/event-stream" };
-    extra_count += 1;
-    extra_headers_buf[extra_count] = .{ .name = "HTTP-Referer", .value = referer_header };
-    extra_count += 1;
-    extra_headers_buf[extra_count] = .{ .name = "X-Title", .value = title_header };
-    extra_count += 1;
+    const extra_headers = [_]std.http.Header{.{ .name = "accept", .value = "text/event-stream" }};
 
     var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
     defer client.deinit();
@@ -221,7 +294,7 @@ pub fn streamPrepared(
         .client = &client,
         .uri = uri,
         .auth_header = auth_header,
-        .extra_headers = extra_headers_buf[0..extra_count],
+        .extra_headers = &extra_headers,
     };
     var connect_deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
         .clock = .awake,
@@ -304,10 +377,10 @@ pub fn streamPrepared(
         owned.deinit(alloc);
     }
 
-    // OpenRouter reports token counts and credit cost inline on the terminal
+    // Local reports token counts and credit cost inline on the terminal
     // chunk, so usage is exact and needs no deferred reconciliation.
     const usage_outcome: stream_provider.UsageOutcome = if (reduced.completion.billing != null)
-        .{ .exact = .openrouter }
+        .{ .exact = .local }
     else
         .{ .unavailable = .possibly_billed };
 
@@ -319,7 +392,7 @@ pub fn streamPrepared(
 }
 
 /// Reads a bounded error body and maps the status onto the neutral failure
-/// contract. The detail string explains the OpenRouter-specific conditions a
+/// contract. The detail string explains the Local-specific conditions a
 /// user is most likely to hit, especially on the free tier.
 fn failureResult(alloc: Allocator, response: *std.http.Client.Response) !stream_provider.Result {
     // Read the headers before the body: consuming the body may reuse the
@@ -330,12 +403,12 @@ fn failureResult(alloc: Allocator, response: *std.http.Client.Response) !stream_
     var transfer: [16 * 1024]u8 = undefined;
     const reader = response.reader(&transfer);
     const bounded_body = reader.allocRemaining(alloc, .limited(max_error_body_bytes + 1)) catch |err| switch (err) {
-        error.StreamTooLong => try alloc.dupe(u8, "OpenRouter error response exceeded the local limit"),
+        error.StreamTooLong => try alloc.dupe(u8, "Local error response exceeded the local limit"),
         else => return err,
     };
     const body = if (bounded_body.len > max_error_body_bytes) body: {
         alloc.free(bounded_body);
-        break :body try alloc.dupe(u8, "OpenRouter error response exceeded the local limit");
+        break :body try alloc.dupe(u8, "Local error response exceeded the local limit");
     } else bounded_body;
     errdefer alloc.free(body);
 
@@ -353,7 +426,7 @@ fn failureResult(alloc: Allocator, response: *std.http.Client.Response) !stream_
     } };
 }
 
-/// Plain-language guidance for the statuses whose OpenRouter meaning is not
+/// Plain-language guidance for the statuses whose Local meaning is not
 /// obvious from the code alone.
 ///
 /// `FailureKind` has no payment-required variant, so a 402 is reported as
@@ -362,12 +435,12 @@ fn failureResult(alloc: Allocator, response: *std.http.Client.Response) !stream_
 /// cannot mislead.
 fn statusGuidance(status: std.http.Status) ?[]const u8 {
     return switch (status) {
-        .payment_required => "OpenRouter returned 402: credit balance is negative; " ++
+        .payment_required => "Local returned 402: credit balance is negative; " ++
             "add credits. This blocks free models too",
-        .too_many_requests => "OpenRouter rate limit reached. Free models allow " ++
+        .too_many_requests => "Local rate limit reached. Free models allow " ++
             "20 requests per minute and 50 per day, raised to 1000 per day once " ++
             "you have purchased at least 10 credits",
-        .service_unavailable => "No OpenRouter provider currently satisfies the " ++
+        .service_unavailable => "No Local provider currently satisfies the " ++
             "routing requirements for this model",
         else => null,
     };
@@ -425,7 +498,7 @@ fn failureKind(status: std.http.Status) stream_provider.FailureKind {
 
 /// Frames the response body into SSE `data:` payloads.
 ///
-/// OpenRouter injects `: OPENROUTER PROCESSING` comment lines as keep-alives
+/// Local injects `: LOCAL PROCESSING` comment lines as keep-alives
 /// during long provider waits. They are valid SSE framing but invalid JSON, so
 /// they are dropped here rather than reaching the reducer.
 const SseReader = struct {
@@ -452,7 +525,7 @@ const SseReader = struct {
                 self.aggregate_bytes,
                 line.wire_bytes,
                 max_sse_aggregate_bytes,
-            ) catch return error.OpenRouterResourceLimitExceeded;
+            ) catch return error.LocalResourceLimitExceeded;
             const trimmed = std.mem.trim(u8, line.bytes, " \t\r");
             if (trimmed.len == 0 or chat_completions.isCommentLine(trimmed)) {
                 self.release();
@@ -473,9 +546,9 @@ const SseReader = struct {
             const fragment = reader.takeDelimiter('\n') catch |err| switch (err) {
                 error.StreamTooLong => {
                     const buffered = reader.buffered();
-                    if (buffered.len == 0) return error.OpenRouterSseReadStalled;
+                    if (buffered.len == 0) return error.LocalSseReadStalled;
                     if (buffered.len > max_sse_line_bytes - self.pending_line.items.len) {
-                        return error.OpenRouterSseEventTooLarge;
+                        return error.LocalSseEventTooLarge;
                     }
                     try self.pending_line.appendSlice(alloc, buffered);
                     reader.tossBuffered();
@@ -492,7 +565,7 @@ const SseReader = struct {
                 return null;
             };
             if (fragment.len > max_sse_line_bytes - self.pending_line.items.len) {
-                return error.OpenRouterSseEventTooLarge;
+                return error.LocalSseEventTooLarge;
             }
             if (self.pending_line.items.len == 0) {
                 return .{ .bytes = fragment, .wire_bytes = fragment.len + 1 };
@@ -575,13 +648,13 @@ fn consumeSse(
 
 fn mapReducerError(err: anyerror) anyerror {
     return switch (err) {
-        error.InvalidEvent => error.InvalidOpenRouterSseEvent,
-        error.ResponseFailed => error.OpenRouterResponseFailed,
-        error.StreamIncomplete => error.OpenRouterStreamIncomplete,
-        error.InvalidToolCall => error.InvalidOpenRouterToolCall,
-        error.ToolCallLimitExceeded => error.OpenRouterToolCallLimitExceeded,
-        error.ToolArgumentsTooLarge => error.OpenRouterToolArgumentsTooLarge,
-        error.ResourceLimitExceeded => error.OpenRouterResourceLimitExceeded,
+        error.InvalidEvent => error.InvalidLocalSseEvent,
+        error.ResponseFailed => error.LocalResponseFailed,
+        error.StreamIncomplete => error.LocalStreamIncomplete,
+        error.InvalidToolCall => error.InvalidLocalToolCall,
+        error.ToolCallLimitExceeded => error.LocalToolCallLimitExceeded,
+        error.ToolArgumentsTooLarge => error.LocalToolArgumentsTooLarge,
+        error.ResourceLimitExceeded => error.LocalResourceLimitExceeded,
         else => err,
     };
 }
@@ -619,13 +692,13 @@ fn testModelRequest(
     };
 }
 
-test "OpenRouter rejects wrong-origin credentials before any network I/O" {
+test "Local rejects wrong-origin credentials before any network I/O" {
     var delivery = stream_provider.DeliveryCertainty.init();
     var evidence = stream_provider.AttemptEvidence{};
     var cancelled = std.atomic.Value(bool).init(false);
     var context: u8 = 0;
 
-    // A Gateway or subscription credential must never be spent on OpenRouter.
+    // A Gateway or subscription credential must never be spent on Local.
     for ([_]?types.CredentialSource{
         .ai_gateway_api_key,
         .chatgpt_subscription,
@@ -634,15 +707,15 @@ test "OpenRouter rejects wrong-origin credentials before any network I/O" {
     }) |source| {
         const request = testModelRequest("key", source, &delivery, &evidence, &cancelled, &context);
         try testing.expectError(
-            error.OpenRouterApiKeyRequired,
+            error.LocalApiKeyRequired,
             streamCompletion(null, testing.allocator, request),
         );
     }
 
     // The right origin with an empty secret is still refused.
-    const empty = testModelRequest("", .openrouter_api_key, &delivery, &evidence, &cancelled, &context);
+    const empty = testModelRequest("", .local_api_key, &delivery, &evidence, &cancelled, &context);
     try testing.expectError(
-        error.OpenRouterApiKeyRequired,
+        error.LocalApiKeyRequired,
         streamCompletion(null, testing.allocator, empty),
     );
 
@@ -652,15 +725,15 @@ test "OpenRouter rejects wrong-origin credentials before any network I/O" {
     );
 }
 
-test "OpenRouter rejects malformed model identifiers" {
+test "Local rejects malformed model identifiers" {
     for ([_][]const u8{ "", "has space", "has\ttab" }) |model| {
-        try testing.expectError(error.InvalidOpenRouterModel, validateModel(model));
+        try testing.expectError(error.InvalidLocalModel, validateModel(model));
     }
     try validateModel("z-ai/glm-5.2:free");
     try validateModel("anthropic/claude-opus-4.8");
 }
 
-test "OpenRouter request serializes messages tools reasoning and output limit" {
+test "Local request serializes messages tools reasoning and output limit" {
     const read_file_schema = model_tool_schema.FunctionSchema{
         .name = "read_file",
         .description = "Read a file.",
@@ -686,7 +759,7 @@ test "OpenRouter request serializes messages tools reasoning and output limit" {
     });
     defer testing.allocator.free(payload);
 
-    // The payload must be valid JSON with the OpenRouter/OpenAI chat shape.
+    // The payload must be valid JSON with the Local/OpenAI chat shape.
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, payload, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
@@ -712,7 +785,7 @@ test "OpenRouter request serializes messages tools reasoning and output limit" {
     );
 }
 
-test "OpenRouter omits tool_choice when no tools are advertised" {
+test "Local omits tool_choice when no tools are advertised" {
     const messages = [_]types.ChatMessage{.{ .role = .user, .content = "hi" }};
     const payload = try buildRequest(testing.allocator, .{
         .model = "z-ai/glm-5.2:free",
@@ -730,7 +803,7 @@ test "OpenRouter omits tool_choice when no tools are advertised" {
     try testing.expect(parsed.value.object.get("max_tokens") == null);
 }
 
-test "OpenRouter maps HTTP status onto the neutral failure contract" {
+test "Local maps HTTP status onto the neutral failure contract" {
     try testing.expectEqual(stream_provider.FailureKind.unauthorized, failureKind(.unauthorized));
     // A negative balance blocks even free models, so it must not be retried as
     // a transient fault.
@@ -746,11 +819,11 @@ test "OpenRouter maps HTTP status onto the neutral failure contract" {
     try testing.expect(statusGuidance(.ok) == null);
 }
 
-test "OpenRouter SSE stream survives keep-alive comments and reports exact usage" {
+test "Local SSE stream survives keep-alive comments and reports exact usage" {
     const sse_text =
-        ": OPENROUTER PROCESSING\n\n" ++
+        ": LOCAL PROCESSING\n\n" ++
         "data: {\"id\":\"gen-abc\",\"model\":\"z-ai/glm-5.2:free\",\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n" ++
-        ": OPENROUTER PROCESSING\n\n" ++
+        ": LOCAL PROCESSING\n\n" ++
         "data: {\"id\":\"gen-abc\",\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n" ++
         "data: {\"id\":\"gen-abc\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]," ++
         "\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"cost\":0}}\n\n" ++
@@ -799,7 +872,7 @@ test "OpenRouter SSE stream survives keep-alive comments and reports exact usage
     try testing.expectEqual(@as(f64, 0), reduced.completion.billing.?.total_cost);
 }
 
-test "OpenRouter surfaces a mid-stream error delivered over HTTP 200" {
+test "Local surfaces a mid-stream error delivered over HTTP 200" {
     const sse_text =
         "data: {\"id\":\"gen-1\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n" ++
         "data: {\"id\":\"gen-1\",\"error\":{\"code\":429,\"message\":\"Rate limit exceeded\"}," ++
@@ -812,7 +885,7 @@ test "OpenRouter surfaces a mid-stream error delivered over HTTP 200" {
     };
     var context: u8 = 0;
 
-    try testing.expectError(error.OpenRouterResponseFailed, consumeSse(
+    try testing.expectError(error.LocalResponseFailed, consumeSse(
         testing.allocator,
         &reader,
         &context,
@@ -826,7 +899,7 @@ test "OpenRouter surfaces a mid-stream error delivered over HTTP 200" {
     ));
 }
 
-test "OpenRouter rejects a stream that never reaches a terminal event" {
+test "Local rejects a stream that never reaches a terminal event" {
     const sse_text = "data: {\"id\":\"gen-1\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
     var reader: std.Io.Reader = .fixed(sse_text);
     var cancelled = std.atomic.Value(bool).init(false);
@@ -835,7 +908,7 @@ test "OpenRouter rejects a stream that never reaches a terminal event" {
     };
     var context: u8 = 0;
 
-    try testing.expectError(error.OpenRouterStreamIncomplete, consumeSse(
+    try testing.expectError(error.LocalStreamIncomplete, consumeSse(
         testing.allocator,
         &reader,
         &context,
@@ -849,9 +922,58 @@ test "OpenRouter rejects a stream that never reaches a terminal event" {
     ));
 }
 
-test "OpenRouter refuses a non-loopback e2e endpoint override" {
-    // The override exists only for local fixtures; it must never be able to
-    // redirect live traffic to an arbitrary host.
-    try testing.expect(!gateway_client.isLoopbackHttpUrl("https://evil.example/api/v1/chat/completions"));
-    try testing.expect(gateway_client.isLoopbackHttpUrl("http://127.0.0.1:8080/api/v1/chat/completions"));
+test "endpoint resolution derives chat and models URLs from the base" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Default base points at the local inference server convention.
+    try testing.expect(std.mem.indexOf(u8, default_base_url, "127.0.0.1") != null);
+
+    try testing.expect(validateEndpointUrl("http://127.0.0.1:8080/v1"));
+    try testing.expect(validateEndpointUrl("http://localhost:11434/v1"));
+    try testing.expect(validateEndpointUrl("https://tailscale-host.example/v1"));
+    try testing.expect(!validateEndpointUrl("http://evil.example/v1"));
+    try testing.expect(!validateEndpointUrl("not a url"));
+
+    try testing.expectEqualStrings(
+        "http://127.0.0.1:9999/v1/chat/completions",
+        try deriveChatEndpoint(alloc, null, "http://127.0.0.1:9999/v1/"),
+    );
+    try testing.expectEqualStrings(
+        "http://127.0.0.1:9999/v1/models",
+        try deriveModelsEndpoint(alloc, "http://127.0.0.1:9999/v1/"),
+    );
+    try testing.expectEqualStrings(
+        "http://127.0.0.1:8080/v1/chat/completions",
+        try deriveChatEndpoint(alloc, "http://127.0.0.1:8080/v1/chat/completions", "http://127.0.0.1:9999/v1"),
+    );
+    try testing.expectError(error.InvalidLocalEndpoint, deriveChatEndpoint(alloc, null, "http://evil.example/v1"));
+    try testing.expectError(error.InvalidLocalEndpoint, deriveModelsEndpoint(alloc, "ftp://127.0.0.1/v1"));
+}
+
+test "leading system messages merge into one for strict local servers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const messages = [_]types.ChatMessage{
+        .{ .role = .system, .content = "identity" },
+        .{ .role = .system, .content = "tools" },
+        .{ .role = .system, .content = null },
+        .{ .role = .user, .content = "hi" },
+        .{ .role = .system, .content = "late block stays" },
+    };
+    const merged = try mergeLeadingSystemMessages(alloc, &messages);
+    defer merged.deinit(alloc);
+
+    try testing.expect(merged.owned);
+    try testing.expectEqual(@as(usize, 3), merged.messages.len);
+    try testing.expectEqualStrings("identity\n\ntools", merged.messages[0].content.?);
+    try testing.expectEqual(types.ChatRole.user, merged.messages[1].role);
+    try testing.expectEqualStrings("late block stays", merged.messages[2].content.?);
+
+    const single = [_]types.ChatMessage{.{ .role = .system, .content = "only one" }};
+    const passthrough = try mergeLeadingSystemMessages(alloc, &single);
+    try testing.expect(!passthrough.owned);
 }

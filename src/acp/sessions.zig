@@ -1308,7 +1308,7 @@ pub fn writeProviderConfigOption(
     try w.writeAll(",\"options\":[{\"value\":\"gateway\",\"name\":\"Vercel AI Gateway\"},{\"value\":\"codex\",\"name\":\"Codex subscription\"}");
     if (comptime !host_target.is_wasm) {
         try w.writeAll(",{\"value\":\"grok\",\"name\":\"Grok subscription\"}");
-        try w.writeAll(",{\"value\":\"openrouter\",\"name\":\"OpenRouter API key\"}");
+        try w.writeAll(",{\"value\":\"local\",\"name\":\"Local API key\"}");
     }
     try w.writeAll("]}");
 }

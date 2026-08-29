@@ -47,38 +47,36 @@ fx login grok
 fx
 ```
 
-Or use an OpenRouter API key, which needs no subscription and includes models that
-are free to run:
+Or run a model from any OpenAI-compatible server — llama.cpp, MLX, Ollama, vLLM,
+LM Studio — on your own machine:
 
 ```bash
-export OPENROUTER_API_KEY=...
-fx provider openrouter
+export LOCAL_API_KEY=x          # any value; local servers ignore it
+fx provider local
 fx
 ```
 
-`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, open `/setup` and choose **Model provider** to move between Gateway, Codex, Grok, and OpenRouter. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session without affecting other providers; choosing it again from **Model provider** starts sign-in.
+`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, open `/setup` and choose **Model provider** to move between Gateway, Codex, Grok, and Local. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session without affecting other providers; choosing it again from **Model provider** starts sign-in.
 
 The OpenAI Codex route uses ChatGPT subscription access directly and never sends its OAuth token to Vercel AI Gateway. The session is stored privately at `~/.fx/chatgpt-auth.json` and refreshed when needed. On supported Codex models, `/fast` requests OpenAI's priority service tier and consumes ChatGPT credits at the higher Fast mode rate.
 
 The Grok route uses subscription access directly at xAI and never sends its OAuth token to Vercel AI Gateway or OpenAI. Its session is stored privately at `~/.fx/grok-auth.json`, refreshed when needed, and used only with the authenticated xAI catalog and Responses API.
 
-The OpenRouter route talks directly to `openrouter.ai` with the API key from
-`OPENROUTER_API_KEY` and never sends it to Vercel AI Gateway, OpenAI, or xAI.
-It authenticates with a plain API key rather than OAuth, so there is no stored
-session and no `fx logout openrouter`; unset the variable to stop using it.
-
-Because fx calls tools on every turn, its OpenRouter catalog lists only
-tool-capable models. Free models are listed first and marked, both in `/model`
-and on the command line:
+The Local route talks directly to your own server and never sends prompts to
+Vercel AI Gateway, OpenAI, or xAI. It reads `FX_LOCAL_BASE_URL` (default
+`http://127.0.0.1:8080/v1`) and calls `<base>/chat/completions` and
+`<base>/models`. Plain HTTP is accepted only for loopback hosts; any host is
+accepted over HTTPS, so a server on another tailnet machine works too. Point
+one variable at your server:
 
 ```bash
-fx models --free          # only the models that cost nothing
-fx models --json          # each entry reports whether it is free
+export FX_LOCAL_BASE_URL=http://127.0.0.1:11434/v1   # Ollama
+export FX_LOCAL_BASE_URL=https://studio.internal:8080/v1
 ```
 
-Free models are rate limited by OpenRouter to 20 requests per minute and 50 per
-day, raised to 1000 per day once you have purchased at least 10 credits. An
-agent session can reach those caps quickly.
+`fx models` lists whatever the server currently has loaded. The route assumes
+the loaded checkpoints can call tools, which is true of current agent-tuned
+models.
 
 To use an AI Gateway API key instead:
 

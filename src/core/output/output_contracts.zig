@@ -377,8 +377,8 @@ fn grokProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
     return auth.grok_connected or auth.active_source == .grok_subscription;
 }
 
-fn openRouterProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
-    return auth.openrouter_connected or auth.active_source == .openrouter_api_key;
+fn localProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    return auth.local_connected or auth.active_source == .local_api_key;
 }
 
 fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.StatusSnapshot) !void {
@@ -397,9 +397,9 @@ fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.Status
         if (!wrote_provider) try writer.writeAll("Grok");
         wrote_provider = true;
     }
-    if (openRouterProviderConnected(auth)) {
-        if (wrote_provider) try writer.writeAll(", OpenRouter");
-        if (!wrote_provider) try writer.writeAll("OpenRouter");
+    if (localProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", Local");
+        if (!wrote_provider) try writer.writeAll("Local");
         wrote_provider = true;
     }
     if (!wrote_provider) try writer.writeAll("none");
@@ -635,9 +635,9 @@ pub const StatusSnapshot = struct {
                 try std.json.Stringify.value("grok", .{}, writer);
                 wrote_provider = true;
             }
-            if (openRouterProviderConnected(self.auth)) {
+            if (localProviderConnected(self.auth)) {
                 if (wrote_provider) try writer.writeByte(',');
-                try std.json.Stringify.value("openrouter", .{}, writer);
+                try std.json.Stringify.value("local", .{}, writer);
             }
             try writer.writeByte(']');
         }
@@ -773,7 +773,7 @@ pub const ModelListSnapshot = struct {
     /// Free models are marked only where the provider publishes per-model
     /// pricing; elsewhere the `:free` suffix carries no meaning.
     fn marksFreeModels(self: ModelListSnapshot) bool {
-        return self.provider == .openrouter;
+        return self.provider == .local;
     }
 
     fn isFree(self: ModelListSnapshot, id: []const u8) bool {
@@ -895,7 +895,7 @@ pub const ModelListSnapshot = struct {
             .gateway => "gateway",
             .codex => provider_catalog.label(.codex),
             .grok => provider_catalog.label(.grok),
-            .openrouter => provider_catalog.label(.openrouter),
+            .local => provider_catalog.label(.local),
         };
     }
 
@@ -3325,13 +3325,13 @@ test "usage text and JSON render the same optional and ordered facts" {
 test "model list marks free models only for providers that publish pricing" {
     const ids = [_][]const u8{ "z-ai/glm-5.2:free", "qwen/qwen3.8-flash" };
 
-    const openrouter_text = try (ModelListSnapshot{
+    const local_text = try (ModelListSnapshot{
         .ids = &ids,
-        .provider = .openrouter,
+        .provider = .local,
     }).renderText(std.testing.allocator);
-    defer std.testing.allocator.free(openrouter_text);
-    try std.testing.expect(std.mem.indexOf(u8, openrouter_text, "z-ai/glm-5.2:free · OpenRouter API key · free") != null);
-    try std.testing.expect(std.mem.indexOf(u8, openrouter_text, "qwen/qwen3.8-flash · OpenRouter API key\n") != null);
+    defer std.testing.allocator.free(local_text);
+    try std.testing.expect(std.mem.indexOf(u8, local_text, "z-ai/glm-5.2:free · Local API key · free") != null);
+    try std.testing.expect(std.mem.indexOf(u8, local_text, "qwen/qwen3.8-flash · Local API key\n") != null);
 
     // A `:free`-suffixed id from another provider carries no pricing meaning.
     const grok_text = try (ModelListSnapshot{
@@ -3346,17 +3346,17 @@ test "model list json reports per-model free state without changing the default 
     const ids = [_][]const u8{ "z-ai/glm-5.2:free", "qwen/qwen3.8-flash" };
     const json = try (ModelListSnapshot{
         .ids = &ids,
-        .provider = .openrouter,
+        .provider = .local,
     }).renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"z-ai/glm-5.2:free\",\"source\":\"OpenRouter API key\",\"free\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"qwen/qwen3.8-flash\",\"source\":\"OpenRouter API key\",\"free\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"z-ai/glm-5.2:free\",\"source\":\"Local API key\",\"free\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"qwen/qwen3.8-flash\",\"source\":\"Local API key\",\"free\":false") != null);
     // Unfiltered listings keep the pre-existing payload shape.
     try std.testing.expect(std.mem.indexOf(u8, json, "free_only") == null);
 
     const filtered = try (ModelListSnapshot{
         .ids = ids[0..1],
-        .provider = .openrouter,
+        .provider = .local,
         .free_only = true,
     }).renderJson(std.testing.allocator);
     defer std.testing.allocator.free(filtered);

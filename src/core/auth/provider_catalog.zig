@@ -38,12 +38,12 @@ pub const entries = [_]Entry{
         .subscription = true,
     },
     .{
-        .id = .openrouter,
-        .slug = "openrouter",
-        .aliases = &.{"or"},
-        .name = "OpenRouter",
-        .route_name = "OpenRouter API key",
-        .description = "OpenRouter API key; free models available",
+        .id = .local,
+        .slug = "local",
+        .aliases = &.{ "openai", "ollama", "llamacpp", "mlx", "vllm" },
+        .name = "Local",
+        .route_name = "Local API key",
+        .description = "OpenAI-compatible server: llama.cpp, MLX, Ollama, vLLM",
         .subscription = false,
     },
 };

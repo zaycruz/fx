@@ -1064,7 +1064,7 @@ pub fn Runtime(comptime App: type) type {
                         .agent_stream = tool_context.agent_stream_provider,
                         .permission_reviewer = tool_context.permission_reviewer_provider,
                     },
-                    .openrouter = .{
+                    .local = .{
                         .capabilities = tool_context.provider_capabilities,
                         .agent_stream = tool_context.agent_stream_provider,
                         .permission_reviewer = tool_context.permission_reviewer_provider,

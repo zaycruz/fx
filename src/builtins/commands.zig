@@ -91,13 +91,13 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .login,
         .token = "login",
-        .usage = "login [vercel|codex|grok|openrouter]",
+        .usage = "login [vercel|codex|grok|local]",
         .summary = "Sign in to Vercel or a selected provider",
     },
     .{
         .kind = .logout,
         .token = "logout",
-        .usage = "logout [vercel|codex|grok|openrouter]",
+        .usage = "logout [vercel|codex|grok|local]",
         .summary = "Sign out of Vercel or a selected provider session",
     },
     .{
@@ -163,7 +163,7 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .provider,
         .token = "provider",
-        .usage = "provider <gateway|codex|grok|openrouter>",
+        .usage = "provider <gateway|codex|grok|local>",
         .summary = "Choose the model provider used by fx",
     },
     .{
@@ -318,9 +318,9 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .replay, .usage = "replay <tape>" },
     } },
     .{ .entries = &.{
-        .{ .kind = .login, .usage = "login [vercel|codex|grok|openrouter]" },
-        .{ .kind = .logout, .usage = "logout [vercel|codex|grok|openrouter]" },
-        .{ .kind = .provider, .usage = "provider <gateway|codex|grok|openrouter>" },
+        .{ .kind = .login, .usage = "login [vercel|codex|grok|local]" },
+        .{ .kind = .logout, .usage = "logout [vercel|codex|grok|local]" },
+        .{ .kind = .provider, .usage = "provider <gateway|codex|grok|local>" },
         .{ .kind = .setup, .usage = "setup" },
         .{ .kind = .teams, .usage = "teams" },
         .{ .kind = .credits, .usage = "credits|balance" },

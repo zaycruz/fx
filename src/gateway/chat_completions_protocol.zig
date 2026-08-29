@@ -34,8 +34,8 @@ pub const StreamCallbacks = struct {
     on_tool_input: ?stream_provider.StreamCallback = null,
 };
 
-/// True for SSE framing lines that carry no JSON payload. OpenRouter emits
-/// `: OPENROUTER PROCESSING` keep-alive comments mid-stream; per the SSE spec a
+/// True for SSE framing lines that carry no JSON payload. Local emits
+/// `: LOCAL PROCESSING` keep-alive comments mid-stream; per the SSE spec a
 /// leading colon marks a comment, and handing one to a JSON parser would abort
 /// an otherwise healthy stream.
 pub fn isCommentLine(line: []const u8) bool {
@@ -510,7 +510,7 @@ pub const Reducer = struct {
             .output_tokens = self.usage.output_tokens orelse 0,
             .cache_read_tokens = self.usage.cache_read_tokens orelse 0,
             // Chat Completions reports cache reads but has no cache-write
-            // counter; OpenRouter bills writes inside the prompt total.
+            // counter; Local bills writes inside the prompt total.
             .cache_write_tokens = 0,
             .reasoning_tokens = self.usage.reasoning_tokens,
             .billable_web_search_calls = 0,
@@ -685,12 +685,12 @@ fn reduceSse(
 
 test "chat completions stream reduces text reasoning tool calls and usage" {
     const sse =
-        \\: OPENROUTER PROCESSING
+        \\: LOCAL PROCESSING
         \\data: {"id":"gen-1","model":"z-ai/glm-5.2:free","choices":[{"index":0,"delta":{"reasoning":"thinking"}}]}
         \\
         \\data: {"id":"gen-1","choices":[{"index":0,"delta":{"content":"Hel"}}]}
         \\
-        \\: OPENROUTER PROCESSING
+        \\: LOCAL PROCESSING
         \\
         \\data: {"id":"gen-1","choices":[{"index":0,"delta":{"content":"lo"}}]}
         \\
@@ -733,9 +733,9 @@ test "chat completions stream reduces text reasoning tool calls and usage" {
 }
 
 test "chat completions keep-alive comments never reach the JSON parser" {
-    // A bare `: OPENROUTER PROCESSING` line is valid SSE framing but invalid
+    // A bare `: LOCAL PROCESSING` line is valid SSE framing but invalid
     // JSON; passing it to applyJson must be prevented by isCommentLine.
-    try testing.expect(isCommentLine(": OPENROUTER PROCESSING"));
+    try testing.expect(isCommentLine(": LOCAL PROCESSING"));
     try testing.expect(isCommentLine(":"));
     try testing.expect(!isCommentLine("data: {}"));
     try testing.expect(!isCommentLine(""));
@@ -748,7 +748,7 @@ test "chat completions keep-alive comments never reach the JSON parser" {
 
     try testing.expectError(error.InvalidEvent, reducer.applyJson(
         testing.allocator,
-        ": OPENROUTER PROCESSING",
+        ": LOCAL PROCESSING",
         capture.callbacks(),
         &cancel,
         null,

@@ -59,7 +59,7 @@ pub fn Runtime(comptime App: type) type {
                 const required_source: credentials.Source = switch (provider) {
                     .codex => .chatgpt_subscription,
                     .grok => .grok_subscription,
-                    .openrouter => .openrouter_api_key,
+                    .local => .local_api_key,
                     .gateway => app.auth.credentialSource() orelse .fx_login,
                 };
                 const route_change = app.auth.selectForProvider(app.alloc, provider) catch |err| switch (err) {
@@ -278,12 +278,12 @@ pub fn Runtime(comptime App: type) type {
                     .grok_login => try beginGrokSignIn(app),
                     // There is no sign-in flow to start: the key is read from
                     // the environment, so report how to supply it.
-                    .openrouter_key => try app.writeDomainNotice(.{
+                    .local_key => try app.writeDomainNotice(.{
                         .topic = "auth",
                         .tone = .information,
-                        .body = "OpenRouter reads " ++ credentials.openrouter_api_key_env ++
+                        .body = "Local reads " ++ credentials.local_api_key_env ++
                             " from the environment. Set it, restart fx, then choose " ++
-                            "OpenRouter under Model provider.",
+                            "Local under Model provider.",
                     }, true),
                     .setup => {
                         if (comptime !runtime_profile.allows(App, .native_auth)) {
@@ -1402,7 +1402,7 @@ test "interactive subscription sign-in rejects active and queued work before OAu
             switch (provider) {
                 .codex => try Runtime(BusySignInApp).beginChatGptSignIn(&app),
                 .grok => try Runtime(BusySignInApp).beginGrokSignIn(&app),
-                .gateway, .openrouter => unreachable,
+                .gateway, .local => unreachable,
             }
 
             try std.testing.expectEqual(@as(usize, 0), app.auth.start_count);

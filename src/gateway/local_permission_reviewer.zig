@@ -2,7 +2,7 @@ const std = @import("std");
 const permission_auto_classifier = @import("../core/permissions/auto_classifier.zig");
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const types = @import("../core/shared/types.zig");
-const openrouter = @import("openrouter.zig");
+const local = @import("local.zig");
 const responses_reviewer = @import("responses_permission_reviewer.zig");
 
 const Allocator = std.mem.Allocator;
@@ -10,23 +10,23 @@ const Allocator = std.mem.Allocator;
 /// The reviewer adapter is protocol-agnostic: it only needs a request builder
 /// and a sender, so the Chat Completions route reuses it unchanged.
 pub const provider = permission_auto_classifier.Provider{
-    .review_fn = reviewOpenRouter,
+    .review_fn = reviewLocal,
 };
 
-fn reviewOpenRouter(
+fn reviewLocal(
     _: ?*anyopaque,
     alloc: Allocator,
     input: permission_auto_classifier.ProviderInput,
     request: permission_auto_classifier.ReviewRequest,
 ) anyerror!permission_auto_classifier.ParseOutcome {
     return responses_reviewer.review(alloc, input, request, .{
-        .source = .openrouter_api_key,
-        // OpenRouter has no dedicated small reviewer model, so reviews run on
+        .source = .local_api_key,
+        // Local has no dedicated small reviewer model, so reviews run on
         // whatever model the turn already selected.
         .model = request.review_turn.model,
         .require_account = false,
         .validate_fn = validateCredential,
-        .build_fn = openrouter.buildRequest,
+        .build_fn = local.buildRequest,
         .send_fn = sendPrepared,
     });
 }
@@ -43,10 +43,10 @@ fn sendPrepared(
     request: stream_provider.ModelRequest,
     payload: []const u8,
 ) anyerror!stream_provider.Result {
-    return openrouter.streamPrepared(alloc, request, payload);
+    return local.streamPrepared(alloc, request, payload);
 }
 
-test "OpenRouter reviewer builds a chat-completions request with the admitted model" {
+test "Local reviewer builds a chat-completions request with the admitted model" {
     const messages = [_]types.ChatMessage{
         .{ .role = .user, .content = "User requested the change." },
         .{
@@ -70,7 +70,7 @@ test "OpenRouter reviewer builds a chat-completions request with the admitted mo
             .raw = .fromSeconds(5),
         }),
         &cancelled,
-        openrouter.buildRequest,
+        local.buildRequest,
     );
     defer std.testing.allocator.free(body);
 

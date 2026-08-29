@@ -83,7 +83,7 @@ fn setupChoiceLabel(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .switch_provider => "Model provider",
                 .change_team => "Vercel team",
                 .switch_credential => "Credential source",
-                .login, .chatgpt_login, .grok_login, .setup, .openrouter_key, .automatic => "",
+                .login, .chatgpt_login, .grok_login, .setup, .local_key, .automatic => "",
             },
             .provider, .source, .team => "",
         },
@@ -93,7 +93,7 @@ fn setupChoiceLabel(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .chatgpt_login => "Codex subscription",
                 .grok_login => "Grok subscription",
                 .setup => "AI Gateway API key",
-                .openrouter_key => "OpenRouter API key",
+                .local_key => "Local API key",
                 .connections, .change_team, .switch_credential, .switch_provider, .automatic => "",
             },
             .provider, .source, .team => "",
@@ -119,7 +119,7 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                     view.activeSourceLabel()
                 else
                     "not connected",
-                .login, .chatgpt_login, .grok_login, .setup, .openrouter_key, .automatic => "",
+                .login, .chatgpt_login, .grok_login, .setup, .local_key, .automatic => "",
             },
             .provider, .source, .team => "",
         },
@@ -134,7 +134,7 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                     "environment"
                 else
                     "not configured",
-                .openrouter_key => if (view.available_sources.contains(.openrouter_api_key))
+                .local_key => if (view.available_sources.contains(.local_api_key))
                     "environment"
                 else
                     "not configured",

@@ -432,7 +432,7 @@ fn loadedCatalogStatusText(state: model_cache_runtime.ModelMenuCatalogState) ?[]
             .stored_key => "Gateway catalog: authenticated with the stored API key.",
             .chatgpt_subscription => "Codex catalog: authenticated with a subscription.",
             .grok_subscription => "Grok catalog: authenticated with a subscription.",
-            .openrouter_api_key => "OpenRouter catalog: authenticated with an API key.",
+            .local_api_key => "Local catalog: authenticated with an API key.",
         };
     }
     return null;
@@ -880,7 +880,7 @@ test "token facts abbreviate windows that are not round decimals" {
     // Exact multiples keep their existing rendering.
     try std.testing.expectEqualStrings("1M context", try formatTokenFact(&buf, 1_000_000, "context"));
     try std.testing.expectEqualStrings("128K output", try formatTokenFact(&buf, 128_000, "output"));
-    // Real OpenRouter windows are powers of two and must not print in full.
+    // Real Local windows are powers of two and must not print in full.
     try std.testing.expectEqualStrings("1M context", try formatTokenFact(&buf, 1_048_576, "context"));
     try std.testing.expectEqualStrings("230K output", try formatTokenFact(&buf, 230_400, "output"));
     try std.testing.expectEqualStrings("262K context", try formatTokenFact(&buf, 262_144, "context"));
