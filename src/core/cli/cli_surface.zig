@@ -215,6 +215,12 @@ const LocalSurfaceOptions = struct {
     format: output_contracts.OutputFormat = .text,
 };
 
+const ModelsSurfaceOptions = struct {
+    format: output_contracts.OutputFormat = .text,
+    /// Restrict the listing to models that cost nothing to run.
+    free_only: bool = false,
+};
+
 fn parseLoginProvider(rest: []const [:0]const u8) !?model_provider.ProviderId {
     if (rest.len == 0) return null;
     if (rest.len != 1) return error.InvalidLoginProviderArgs;
@@ -703,6 +709,7 @@ fn activateProviderSelection(
             .gateway => "Gateway is already selected.\n",
             .codex => "Codex is already selected.\n",
             .grok => "Grok is already selected.\n",
+            .local => "Local is already selected.\n",
         });
         return true;
     }
@@ -750,6 +757,7 @@ fn activateProviderSelection(
                 .codex => "Codex credential is unavailable",
                 .grok => "Grok credential is unavailable",
                 .gateway => "configure a Gateway credential first",
+                .local => "set " ++ credentials.local_api_key_env ++ " first",
             },
         );
         return false;
@@ -759,6 +767,7 @@ fn activateProviderSelection(
             .codex => "Codex model catalog is unavailable",
             .grok => "Grok model catalog is unavailable",
             .gateway => "Gateway model catalog is unavailable",
+            .local => "Local model catalog is unavailable",
         });
         return false;
     };
@@ -803,13 +812,16 @@ fn activateProviderSelection(
     if (performed_login) |provider| switch (provider) {
         .codex => try writeStdout(deps, "Signed in with Codex.\n"),
         .grok => try writeStdout(deps, "Signed in with Grok.\n"),
-        .gateway => unreachable,
+        // Only the OAuth providers run a login here; the rest never set
+        // `performed_login`.
+        .gateway, .local => unreachable,
     };
     if (caller == .provider_command) {
         try writeStdout(deps, switch (target) {
             .gateway => "Provider set to Gateway.\n",
             .codex => "Provider set to Codex.\n",
             .grok => "Provider set to Grok.\n",
+            .local => "Provider set to Local.\n",
         });
     }
     return true;
@@ -932,7 +944,7 @@ fn runNonInteractiveWithDeps(
         .issue => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .issue),
         .login => |rest| {
             const maybe_login_provider = parseLoginProvider(rest) catch {
-                try writeStderr(deps, "usage: fx login [vercel|codex|grok]\n");
+                try writeStderr(deps, "usage: fx login [vercel|codex|grok|local]\n");
                 return .handled_failure;
             };
             // Preserve the original `fx login` behavior for scripts and users.
@@ -986,12 +998,31 @@ fn runNonInteractiveWithDeps(
                     }
                     try writeStdout(deps, "Signed in with Grok.\n");
                 },
+                // Local authenticates with a plain API key, so there is no
+                // sign-in flow to run. Point at the environment variable and
+                // switch the active provider if the key is already present.
+                .local => {
+                    const key_present = credentials.sourceExists(alloc, cfg.secret_store, .local_api_key) catch false;
+                    if (!key_present) {
+                        try writeStderr(
+                            deps,
+                            "fx login: Local uses an API key; set " ++
+                                credentials.local_api_key_env ++
+                                " and run fx provider local\n",
+                        );
+                        return .handled_failure;
+                    }
+                    if (!try activateProviderSelection(alloc, cfg, deps, .local, .provider_login)) {
+                        return .handled_failure;
+                    }
+                    try writeStdout(deps, "Using Local.\n");
+                },
             }
             return .handled_success;
         },
         .logout => |rest| {
             const maybe_login_provider = parseLoginProvider(rest) catch {
-                try writeStderr(deps, "usage: fx logout [vercel|codex|grok]\n");
+                try writeStderr(deps, "usage: fx logout [vercel|codex|grok|local]\n");
                 return .handled_failure;
             };
             // Preserve the original `fx logout` behavior for scripts and users.
@@ -1015,6 +1046,16 @@ fn runNonInteractiveWithDeps(
                         break :result .handled_failure;
                     },
                 };
+            }
+            // Local keeps no session of its own, so there is nothing to
+            // remove. Say so rather than falling through to the Vercel logout.
+            if (login_provider == .local) {
+                try writeStdout(
+                    deps,
+                    "Local has no stored session; unset " ++
+                        credentials.local_api_key_env ++ " to stop using it.\n",
+                );
+                return .handled_success;
             }
             if (login_provider == .grok) {
                 const outcome = grok_oauth.logout(alloc, cfg.gateway_provider.oauth_transport) catch {
@@ -1080,11 +1121,11 @@ fn runNonInteractiveWithDeps(
         },
         .provider => |rest| {
             if (rest.len != 1) {
-                try writeStderr(deps, "usage: fx provider <gateway|codex|grok>\n");
+                try writeStderr(deps, "usage: fx provider <gateway|codex|grok|local>\n");
                 return .handled_failure;
             }
             const target = model_provider.parse(rest[0]) orelse {
-                try writeStderr(deps, "fx provider: expected gateway, codex, or grok\n");
+                try writeStderr(deps, "fx provider: expected gateway, codex, grok, or local\n");
                 return .handled_failure;
             };
             return if (try activateProviderSelection(alloc, cfg, deps, target, .provider_command))
@@ -1160,7 +1201,7 @@ fn runNonInteractiveWithDeps(
             return runTopLevelMcp(alloc, rest, cfg, deps);
         },
         .models => |rest| {
-            const opts = parseLocalSurfaceArgs(rest) catch |err| {
+            const opts = parseModelsSurfaceArgs(rest) catch |err| {
                 try writeUsageOrJsonError(alloc, cfg.command_catalog, deps, .models, "models", err, rest);
                 return .handled_failure;
             };
@@ -1180,6 +1221,7 @@ fn runNonInteractiveWithDeps(
                     .gateway => "fx models: Gateway model catalog is unavailable\n",
                     .codex => "fx models: Codex model catalog is unavailable\n",
                     .grok => "fx models: Grok model catalog is unavailable\n",
+                    .local => "fx models: Local model catalog is unavailable\n",
                 });
                 return .handled_failure;
             };
@@ -1215,9 +1257,21 @@ fn runNonInteractiveWithDeps(
             var ids = loaded.ids;
             defer collections.freeStringList(alloc, &ids);
 
+            var shown = ids.items;
+            if (opts.free_only) {
+                // The catalog already sorts free models first, so keeping the
+                // leading free run preserves order without reallocating.
+                var free_count: usize = 0;
+                while (free_count < shown.len and
+                    model_catalog.isFreeModelId(shown[free_count])) : (free_count += 1)
+                {}
+                shown = shown[0..free_count];
+            }
+
             const text = try (output_contracts.ModelListSnapshot{
-                .ids = ids.items,
+                .ids = shown,
                 .provider = startup.provider,
+                .free_only = opts.free_only,
                 .private_models_hidden = loaded.provenance.access.private_models_may_be_hidden,
                 .public_only_reason = loaded.provenance.access.public_only_reason,
             }).render(alloc, opts.format);
@@ -3507,6 +3561,23 @@ fn parseAcpArgs(args: []const [:0]const u8) !AcpOptions {
         }
     }
     return opts;
+}
+
+/// `fx models` accepts `--free` in addition to the shared local-surface flags.
+fn parseModelsSurfaceArgs(args: []const [:0]const u8) !ModelsSurfaceOptions {
+    var options = ModelsSurfaceOptions{};
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            options.format = .json;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--free")) {
+            options.free_only = true;
+            continue;
+        }
+        return error.InvalidLocalSurfaceArgs;
+    }
+    return options;
 }
 
 fn parseLocalSurfaceArgs(args: []const [:0]const u8) !LocalSurfaceOptions {

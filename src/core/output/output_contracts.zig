@@ -7,6 +7,7 @@ const model_provider = @import("../config/model_provider.zig");
 const mcp_contract = @import("../mcp/mcp_contract.zig");
 const mcp_health = @import("../mcp/health.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
+const model_catalog = @import("../gateway/model_catalog.zig");
 const permissions = @import("../permissions/permissions.zig");
 const session_display_metadata = @import("../session/session_display_metadata.zig");
 const session_json = @import("../session/session_json.zig");
@@ -376,6 +377,10 @@ fn grokProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
     return auth.grok_connected or auth.active_source == .grok_subscription;
 }
 
+fn localProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    return auth.local_connected or auth.active_source == .local_api_key;
+}
+
 fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.StatusSnapshot) !void {
     var wrote_provider = false;
     if (gatewayProviderConnected(auth)) {
@@ -390,6 +395,11 @@ fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.Status
     if (grokProviderConnected(auth)) {
         if (wrote_provider) try writer.writeAll(", Grok");
         if (!wrote_provider) try writer.writeAll("Grok");
+        wrote_provider = true;
+    }
+    if (localProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", Local");
+        if (!wrote_provider) try writer.writeAll("Local");
         wrote_provider = true;
     }
     if (!wrote_provider) try writer.writeAll("none");
@@ -623,6 +633,11 @@ pub const StatusSnapshot = struct {
             if (grokProviderConnected(self.auth)) {
                 if (wrote_provider) try writer.writeByte(',');
                 try std.json.Stringify.value("grok", .{}, writer);
+                wrote_provider = true;
+            }
+            if (localProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("local", .{}, writer);
             }
             try writer.writeByte(']');
         }
@@ -750,8 +765,20 @@ pub const ModelListSnapshot = struct {
     ids: []const []const u8,
     provider: model_provider.ProviderId = .gateway,
     limit: ?usize = null,
+    /// The listing was filtered to zero-cost models.
+    free_only: bool = false,
     private_models_hidden: bool = false,
     public_only_reason: ?credentials.CatalogPublicOnlyReason = null,
+
+    /// Free models are marked only where the provider publishes per-model
+    /// pricing; elsewhere the `:free` suffix carries no meaning.
+    fn marksFreeModels(self: ModelListSnapshot) bool {
+        return self.provider == .local;
+    }
+
+    fn isFree(self: ModelListSnapshot, id: []const u8) bool {
+        return self.marksFreeModels() and model_catalog.isFreeModelId(id);
+    }
 
     pub fn render(self: ModelListSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
         return switch (format) {
@@ -776,8 +803,13 @@ pub const ModelListSnapshot = struct {
 
         const shown = self.shownCount();
         for (self.ids[0..shown]) |id| {
+            const free_marker = if (self.isFree(id)) " · free" else "";
             if (self.provider != .gateway) {
-                try out.writer.print(" - {s} · {s}\n", .{ id, provider_catalog.label(self.provider) });
+                try out.writer.print(" - {s} · {s}{s}\n", .{
+                    id,
+                    provider_catalog.label(self.provider),
+                    free_marker,
+                });
             } else {
                 try out.writer.print(" - {s}\n", .{id});
             }
@@ -804,8 +836,13 @@ pub const ModelListSnapshot = struct {
         try out.writer.print("{d} available", .{self.ids.len});
         const shown = self.shownCount();
         for (self.ids[0..shown]) |id| {
+            const free_marker = if (self.isFree(id)) " · free" else "";
             if (self.provider != .gateway) {
-                try out.writer.print("\n - {s} · {s}", .{ id, provider_catalog.label(self.provider) });
+                try out.writer.print("\n - {s} · {s}{s}", .{
+                    id,
+                    provider_catalog.label(self.provider),
+                    free_marker,
+                });
             } else {
                 try out.writer.print("\n - {s}", .{id});
             }
@@ -836,10 +873,16 @@ pub const ModelListSnapshot = struct {
                 try std.json.Stringify.value(id, .{}, &out.writer);
                 try out.writer.writeAll(",\"source\":");
                 try std.json.Stringify.value(provider_catalog.label(self.provider), .{}, &out.writer);
+                if (self.marksFreeModels()) {
+                    try out.writer.writeAll(",\"free\":");
+                    try out.writer.writeAll(if (self.isFree(id)) "true" else "false");
+                }
                 try out.writer.writeByte('}');
             }
         }
-        try out.writer.writeAll("]}");
+        try out.writer.writeAll("]");
+        if (self.free_only) try out.writer.writeAll(",\"free_only\":true");
+        try out.writer.writeAll("}");
         return try out.toOwnedSlice();
     }
 
@@ -852,6 +895,7 @@ pub const ModelListSnapshot = struct {
             .gateway => "gateway",
             .codex => provider_catalog.label(.codex),
             .grok => provider_catalog.label(.grok),
+            .local => provider_catalog.label(.local),
         };
     }
 
@@ -3276,4 +3320,54 @@ test "usage text and JSON render the same optional and ordered facts" {
         "provider/model",
         parsed.value.object.get("models").?.array.items[0].object.get("model").?.string,
     );
+}
+
+test "model list marks free models only for providers that publish pricing" {
+    const ids = [_][]const u8{ "z-ai/glm-5.2:free", "qwen/qwen3.8-flash" };
+
+    const local_text = try (ModelListSnapshot{
+        .ids = &ids,
+        .provider = .local,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(local_text);
+    try std.testing.expect(std.mem.indexOf(u8, local_text, "z-ai/glm-5.2:free · Local API key · free") != null);
+    try std.testing.expect(std.mem.indexOf(u8, local_text, "qwen/qwen3.8-flash · Local API key\n") != null);
+
+    // A `:free`-suffixed id from another provider carries no pricing meaning.
+    const grok_text = try (ModelListSnapshot{
+        .ids = &ids,
+        .provider = .grok,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(grok_text);
+    try std.testing.expect(std.mem.indexOf(u8, grok_text, "· free") == null);
+}
+
+test "model list json reports per-model free state without changing the default shape" {
+    const ids = [_][]const u8{ "z-ai/glm-5.2:free", "qwen/qwen3.8-flash" };
+    const json = try (ModelListSnapshot{
+        .ids = &ids,
+        .provider = .local,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"z-ai/glm-5.2:free\",\"source\":\"Local API key\",\"free\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"qwen/qwen3.8-flash\",\"source\":\"Local API key\",\"free\":false") != null);
+    // Unfiltered listings keep the pre-existing payload shape.
+    try std.testing.expect(std.mem.indexOf(u8, json, "free_only") == null);
+
+    const filtered = try (ModelListSnapshot{
+        .ids = ids[0..1],
+        .provider = .local,
+        .free_only = true,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(filtered);
+    try std.testing.expect(std.mem.indexOf(u8, filtered, "\"free_only\":true}") != null);
+
+    // Other providers never gain the per-model `free` key.
+    const gateway_json = try (ModelListSnapshot{
+        .ids = &ids,
+        .provider = .gateway,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(gateway_json);
+    try std.testing.expect(std.mem.indexOf(u8, gateway_json, "\"free\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, gateway_json, "free_only") == null);
 }

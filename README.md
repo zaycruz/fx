@@ -47,11 +47,38 @@ fx login grok
 fx
 ```
 
-`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, open `/setup` and choose **Model provider** to move between Gateway, Codex, and Grok. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session without affecting other providers; choosing it again from **Model provider** starts sign-in.
+Or run a model from any OpenAI-compatible server — llama.cpp, MLX, Ollama, vLLM,
+LM Studio — on your own machine:
+
+```bash
+export LOCAL_API_KEY=x          # any value; local servers ignore it
+fx provider local
+fx
+```
+
+`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, open `/setup` and choose **Model provider** to move between Gateway, Codex, Grok, and Local. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session without affecting other providers; choosing it again from **Model provider** starts sign-in.
 
 The OpenAI Codex route uses ChatGPT subscription access directly and never sends its OAuth token to Vercel AI Gateway. The session is stored privately at `~/.fx/chatgpt-auth.json` and refreshed when needed. On supported Codex models, `/fast` requests OpenAI's priority service tier and consumes ChatGPT credits at the higher Fast mode rate.
 
 The Grok route uses subscription access directly at xAI and never sends its OAuth token to Vercel AI Gateway or OpenAI. Its session is stored privately at `~/.fx/grok-auth.json`, refreshed when needed, and used only with the authenticated xAI catalog and Responses API.
+
+The Local route talks directly to your own server and never sends prompts to
+Vercel AI Gateway, OpenAI, or xAI. It reads `FX_LOCAL_BASE_URL` (default
+`http://127.0.0.1:8080/v1`) and calls `<base>/chat/completions` and
+`<base>/models`. Plain HTTP is accepted only for literal loopback addresses
+(127.0.0.0/8 or `[::1]`) — not hostnames like `localhost` — so unencrypted
+traffic can never be redirected off-host by DNS or the hosts file. Any host is
+accepted over HTTPS, so a server on another tailnet machine works too. Point
+one variable at your server:
+
+```bash
+export FX_LOCAL_BASE_URL=http://127.0.0.1:11434/v1   # Ollama
+export FX_LOCAL_BASE_URL=https://studio.internal:8080/v1
+```
+
+`fx models` lists whatever the server currently has loaded. The route assumes
+the loaded checkpoints can call tools, which is true of current agent-tuned
+models.
 
 To use an AI Gateway API key instead:
 

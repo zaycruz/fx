@@ -1552,6 +1552,9 @@ fn putModelPreference(
         .gateway => "model",
         .codex => "codex_model",
         .grok => "grok_model",
+        // Local postdates the per-provider `models` object, so it never
+        // had a top-level alias to clean up.
+        .local => "local_model",
     };
     if (root.contains(legacy_key)) {
         _ = root.orderedRemove(legacy_key);

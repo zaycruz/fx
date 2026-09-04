@@ -73,6 +73,10 @@ pub fn signInCompletion(
             .{ .switch_provider = .grok }
         else
             .{ .activate_source = .grok_subscription },
+        .local => if (provider_routing_supported)
+            .{ .switch_provider = .local }
+        else
+            .{ .activate_source = .local_api_key },
     };
 }
 

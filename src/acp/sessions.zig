@@ -580,12 +580,7 @@ fn handleRestoreSession(
     if (!try server.selectCredentialForProvider(state, effective_provider)) {
         return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_request,
-            .message = if (effective_provider == .codex)
-                credentials.missing_chatgpt_credential_message
-            else if (effective_provider == .grok)
-                credentials.missing_grok_credential_message
-            else
-                credentials.missing_credential_message,
+            .message = credentials.missingCredentialMessage(effective_provider),
         });
     }
     const model_copy = try alloc.dupe(u8, effective_model);
@@ -1313,6 +1308,7 @@ pub fn writeProviderConfigOption(
     try w.writeAll(",\"options\":[{\"value\":\"gateway\",\"name\":\"Vercel AI Gateway\"},{\"value\":\"codex\",\"name\":\"Codex subscription\"}");
     if (comptime !host_target.is_wasm) {
         try w.writeAll(",{\"value\":\"grok\",\"name\":\"Grok subscription\"}");
+        try w.writeAll(",{\"value\":\"local\",\"name\":\"Local API key\"}");
     }
     try w.writeAll("]}");
 }

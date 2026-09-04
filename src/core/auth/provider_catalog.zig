@@ -37,6 +37,15 @@ pub const entries = [_]Entry{
         .description = "SuperGrok or X Premium subscription",
         .subscription = true,
     },
+    .{
+        .id = .local,
+        .slug = "local",
+        .aliases = &.{ "openai", "ollama", "llamacpp", "mlx", "vllm" },
+        .name = "Local",
+        .route_name = "Local API key",
+        .description = "OpenAI-compatible server: llama.cpp, MLX, Ollama, vLLM",
+        .subscription = false,
+    },
 };
 
 pub fn parse(value: []const u8) ?model_provider.ProviderId {
